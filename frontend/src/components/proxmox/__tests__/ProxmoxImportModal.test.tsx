@@ -8,10 +8,13 @@ vi.mock('@/api/client', () => ({
     importNetwork: vi.fn(),
     importToPending: vi.fn(),
   },
+  scanApi: {
+    pending: vi.fn(),
+  },
 }))
 vi.mock('sonner', async () => (await import('@/test/mocks')).mockSonner())
 
-import { proxmoxApi } from '@/api/client'
+import { proxmoxApi, scanApi } from '@/api/client'
 import { toast } from 'sonner'
 
 const defaultProps = {
@@ -45,6 +48,7 @@ describe('ProxmoxImportModal', () => {
     defaultProps.onClose.mockReset()
     defaultProps.onAddToCanvas.mockReset()
     defaultProps.onPendingImported.mockReset()
+    vi.mocked(scanApi.pending).mockReset()
   })
 
   it('renders nothing when closed', () => {
@@ -104,11 +108,13 @@ describe('ProxmoxImportModal', () => {
     expect(toast.success).toHaveBeenCalledWith('Found 2 devices')
   })
 
-  it('shows container mode checkbox only in canvas mode', () => {
+  it('shows container mode and link-to-inventory checkboxes only in canvas mode', () => {
     render(<ProxmoxImportModal {...defaultProps} />)
     expect(screen.queryByLabelText(/nest vms/i)).toBeNull()
+    expect(screen.queryByLabelText(/link to scanned inventory/i)).toBeNull()
     fireEvent.click(screen.getByRole('radio', { name: /canvas directly/i }))
     expect(screen.getByLabelText(/nest vms/i)).toBeDefined()
+    expect(screen.getByLabelText(/link to scanned inventory/i)).toBeDefined()
   })
 
   it('passes containerMode=false to onAddToCanvas by default', async () => {
@@ -125,6 +131,7 @@ describe('ProxmoxImportModal', () => {
       expect.any(Array),
       expect.any(Array),
       false,
+      expect.any(Number),
     )
   })
 
@@ -143,6 +150,7 @@ describe('ProxmoxImportModal', () => {
       expect.any(Array),
       expect.any(Array),
       true,
+      expect.any(Number),
     )
   })
 
@@ -159,5 +167,41 @@ describe('ProxmoxImportModal', () => {
     const payload = vi.mocked(proxmoxApi.importNetwork).mock.calls[0][0]
     expect(payload.token_id).toBe('root@pam!hl')
     expect(payload.port).toBe(8006)
+  })
+
+
+  it('fetches pending inventory when link-to-inventory is checked and shows link modal on match', async () => {
+    vi.mocked(proxmoxApi.importNetwork).mockResolvedValue({
+      data: { nodes: sampleNodes, edges: [], device_count: 2 },
+    } as never)
+    vi.mocked(scanApi.pending).mockResolvedValue({
+      data: [{ id: 'dev-1', ip: '10.0.0.5', mac: null, hostname: 'web', os: 'Ubuntu 22.04', services: [{ port: 80, protocol: 'tcp', service_name: 'http' }], suggested_type: 'server', status: 'pending', discovery_source: 'arp', discovered_at: '' }],
+    } as never)
+    render(<ProxmoxImportModal {...defaultProps} />)
+    fireEvent.click(screen.getByRole('radio', { name: /canvas directly/i }))
+    fireEvent.change(screen.getByPlaceholderText('192.168.1.x or pve.local'), { target: { value: 'pve' } })
+    fireEvent.click(screen.getByRole('button', { name: /fetch inventory/i }))
+    await waitFor(() => expect(screen.getByText('pve1')).toBeDefined())
+    fireEvent.click(screen.getByLabelText(/link to scanned inventory/i))
+    fireEvent.click(screen.getByRole('button', { name: /next: link/i }))
+    await waitFor(() => expect(scanApi.pending).toHaveBeenCalled())
+    await waitFor(() => expect(screen.getByText('Link to Scanned Inventory')).toBeDefined())
+  })
+
+  it('skips link modal and adds directly when no inventory matches found', async () => {
+    vi.mocked(proxmoxApi.importNetwork).mockResolvedValue({
+      data: { nodes: sampleNodes, edges: [], device_count: 2 },
+    } as never)
+    vi.mocked(scanApi.pending).mockResolvedValue({ data: [] } as never)
+    render(<ProxmoxImportModal {...defaultProps} />)
+    fireEvent.click(screen.getByRole('radio', { name: /canvas directly/i }))
+    fireEvent.change(screen.getByPlaceholderText('192.168.1.x or pve.local'), { target: { value: 'pve' } })
+    fireEvent.click(screen.getByRole('button', { name: /fetch inventory/i }))
+    await waitFor(() => expect(screen.getByText('pve1')).toBeDefined())
+    fireEvent.click(screen.getByLabelText(/link to scanned inventory/i))
+    fireEvent.click(screen.getByRole('button', { name: /next: link/i }))
+    await waitFor(() => expect(scanApi.pending).toHaveBeenCalled())
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(expect.stringContaining('No matching inventory')))
+    expect(defaultProps.onAddToCanvas).toHaveBeenCalled()
   })
 })

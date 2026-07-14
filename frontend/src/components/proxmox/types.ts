@@ -1,5 +1,7 @@
 /** Shared Proxmox VE import type definitions for the frontend. */
 
+import type { ServiceInfo } from '@/types'
+
 export type ProxmoxNodeType = 'proxmox' | 'vm' | 'lxc'
 
 export interface ProxmoxNode {
@@ -16,6 +18,10 @@ export interface ProxmoxNode {
   vendor?: string | null
   model?: string | null
   parent_ieee?: string | null
+  /** Fields merged from a matched scan device by ProxmoxLinkModal. */
+  services?: ServiceInfo[]
+  os?: string | null
+  mac?: string | null
 }
 
 export interface ProxmoxEdge {

@@ -4,9 +4,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { proxmoxApi, type ProxmoxConnection } from '@/api/client'
+import { proxmoxApi, scanApi, type ProxmoxConnection } from '@/api/client'
 import { toast } from 'sonner'
 import type { ProxmoxNode, ProxmoxEdge, ProxmoxNodeType } from './types'
+import { ProxmoxLinkModal, type ProxmoxLinkMatch } from '@/components/modals/ProxmoxLinkModal'
+import type { PendingDevice } from '@/components/modals/PendingDeviceModal'
 
 interface ProxmoxImportModalProps {
   open: boolean
@@ -53,6 +55,20 @@ const DEVICE_TYPE_COLOR: Record<ProxmoxNodeType, string> = {
   lxc: '#39d353',
 }
 
+function matchProxmoxToScan(proxmoxNodes: ProxmoxNode[], scanDevices: PendingDevice[]): ProxmoxLinkMatch[] {
+  const deviceByIp = new Map<string, PendingDevice>()
+  for (const d of scanDevices) {
+    if (d.ip) deviceByIp.set(d.ip, d)
+  }
+  const matches: ProxmoxLinkMatch[] = []
+  for (const pn of proxmoxNodes) {
+    if (!pn.ip) continue
+    const match = deviceByIp.get(pn.ip)
+    if (match) matches.push({ proxmoxNode: pn, scanDevice: match })
+  }
+  return matches
+}
+
 export function ProxmoxImportModal({ open, onClose, onAddToCanvas, onPendingImported }: ProxmoxImportModalProps) {
   const [form, setForm] = useState<ConnectionForm>(DEFAULT_FORM)
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle')
@@ -64,6 +80,12 @@ export function ProxmoxImportModal({ open, onClose, onAddToCanvas, onPendingImpo
   const [importMode, setImportMode] = useState<ImportMode>('pending')
   const [containerMode, setContainerMode] = useState(false)
   const [columns, setColumns] = useState(2)
+  const [linkToInventory, setLinkToInventory] = useState(false)
+
+  // Link modal state
+  const [linkModalOpen, setLinkModalOpen] = useState(false)
+  const [pendingMatches, setPendingMatches] = useState<ProxmoxLinkMatch[]>([])
+  const [pendingAdd, setPendingAdd] = useState<{ devices: ProxmoxNode[]; edges: ProxmoxEdge[] } | null>(null)
 
   const updateField = (field: keyof ConnectionForm, value: string) =>
     setForm((f) => ({ ...f, [field]: value }))
@@ -134,13 +156,78 @@ export function ProxmoxImportModal({ open, onClose, onAddToCanvas, onPendingImpo
     setChecked(checked.size === devices.length ? new Set() : new Set(devices.map((d) => d.id)))
   }
 
-  const handleAddToCanvas = () => {
+  const commitToCanvas = (nodesToAdd: ProxmoxNode[], edgesToAdd: ProxmoxEdge[]) => {
+    onAddToCanvas(nodesToAdd, edgesToAdd, containerMode, columns)
+  }
+
+  const handleAddToCanvas = async () => {
     const selectedDevices = devices.filter((d) => checked.has(d.id))
     const selectedIds = new Set(selectedDevices.map((d) => d.id))
     const selectedEdges = edges.filter((e) => selectedIds.has(e.source) && selectedIds.has(e.target))
-    onAddToCanvas(selectedDevices, selectedEdges, containerMode, columns)
-    toast.success(`Added ${selectedDevices.length} device${selectedDevices.length !== 1 ? 's' : ''} to canvas`)
-    onClose()
+
+    if (!linkToInventory) {
+      commitToCanvas(selectedDevices, selectedEdges)
+      toast.success(`Added ${selectedDevices.length} device${selectedDevices.length !== 1 ? 's' : ''} to canvas`)
+      onClose()
+      return
+    }
+
+    setLoading(true)
+    try {
+      const res = await scanApi.pending()
+      const scanDevices: PendingDevice[] = res.data
+      const matches = matchProxmoxToScan(selectedDevices, scanDevices)
+
+      if (matches.length === 0) {
+        toast.info('No matching inventory devices found — adding without scan data')
+        commitToCanvas(selectedDevices, selectedEdges)
+        toast.success(`Added ${selectedDevices.length} device${selectedDevices.length !== 1 ? 's' : ''} to canvas`)
+        onClose()
+        return
+      }
+
+      setPendingMatches(matches)
+      setPendingAdd({ devices: selectedDevices, edges: selectedEdges })
+      setLinkModalOpen(true)
+    } catch {
+      toast.error('Failed to fetch inventory — adding without linking')
+      commitToCanvas(selectedDevices, selectedEdges)
+      toast.success(`Added ${selectedDevices.length} device${selectedDevices.length !== 1 ? 's' : ''} to canvas`)
+      onClose()
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleLinkApply = (linkedIds: Set<string>) => {
+    if (!pendingAdd) return
+    const matchMap = new Map(pendingMatches.map((m) => [m.proxmoxNode.id, m.scanDevice]))
+    const enrichedDevices = pendingAdd.devices.map((d) => {
+      const sd = matchMap.get(d.id)
+      if (!sd || !linkedIds.has(d.id)) return d
+      return {
+        ...d,
+        services: (sd.services ?? []) as ProxmoxNode['services'],
+        os: sd.os ?? null,
+        mac: d.mac ?? sd.mac ?? null,
+      }
+    })
+    setLinkModalOpen(false)
+    const total = pendingAdd.devices.length
+    commitToCanvas(enrichedDevices, pendingAdd.edges)
+    toast.success(
+      `Added ${total} device${total !== 1 ? 's' : ''} to canvas · ${linkedIds.size} linked to inventory`
+    )
+    handleClose()
+  }
+
+  const handleLinkSkip = () => {
+    if (!pendingAdd) return
+    setLinkModalOpen(false)
+    const total = pendingAdd.devices.length
+    commitToCanvas(pendingAdd.devices, pendingAdd.edges)
+    toast.success(`Added ${total} device${total !== 1 ? 's' : ''} to canvas`)
+    handleClose()
   }
 
   const handleClose = () => {
@@ -152,6 +239,10 @@ export function ProxmoxImportModal({ open, onClose, onAddToCanvas, onPendingImpo
     setImportMode('pending')
     setContainerMode(false)
     setColumns(2)
+    setLinkToInventory(false)
+    setLinkModalOpen(false)
+    setPendingMatches([])
+    setPendingAdd(null)
     onClose()
   }
 
@@ -162,7 +253,8 @@ export function ProxmoxImportModal({ open, onClose, onAddToCanvas, onPendingImpo
   }
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
+    <>
+      <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
       <DialogContent className="bg-[#161b22] border-border max-w-xl max-h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle className="text-foreground flex items-center gap-2">
@@ -293,6 +385,22 @@ export function ProxmoxImportModal({ open, onClose, onAddToCanvas, onPendingImpo
                     />
                   </label>
                 )}
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={linkToInventory}
+                    onChange={(e) => setLinkToInventory(e.target.checked)}
+                    className="w-3 h-3 cursor-pointer"
+                    style={{ accentColor: ACCENT }}
+                  />
+                  Link to scanned inventory
+                </label>
+                {linkToInventory && (
+                  <p className="pl-4 text-[11px] text-muted-foreground/70 leading-relaxed">
+                    After selecting devices, you&apos;ll be shown any matches found in your scanned inventory
+                    and can choose which to link — nodes will inherit services and OS data from the scan.
+                  </p>
+                )}
               </div>
             )}
             <div className="flex gap-2">
@@ -402,16 +510,25 @@ export function ProxmoxImportModal({ open, onClose, onAddToCanvas, onPendingImpo
           {devices.length > 0 && (
             <Button
               onClick={handleAddToCanvas}
-              disabled={checked.size === 0}
+              disabled={checked.size === 0 || loading}
               style={{ background: ACCENT, color: '#0d1117' }}
               className="gap-1.5"
             >
-              <Plus size={13} />
-              Add {checked.size} to Canvas
+              {loading ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+              {linkToInventory ? 'Next: Link & Add to Canvas' : `Add ${checked.size} to Canvas`}
             </Button>
           )}
         </DialogFooter>
       </DialogContent>
-    </Dialog>
+      </Dialog>
+
+      <ProxmoxLinkModal
+        open={linkModalOpen}
+        matches={pendingMatches}
+        unmatchedCount={pendingAdd ? pendingAdd.devices.length - pendingMatches.length : 0}
+        onApply={handleLinkApply}
+        onSkip={handleLinkSkip}
+      />
+    </>
   )
 }
