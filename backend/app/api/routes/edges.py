@@ -14,16 +14,12 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
-async def _abs_y(db: AsyncSession, node_id: str) -> float | None:
-    """Resolve the approximate absolute canvas Y of a node.
+async def _walk_y(db: AsyncSession, node: Node) -> float:
+    """Accumulate absolute canvas Y starting from an already-loaded Node.
 
-    Walks up the parent chain (up to 8 levels) and accumulates pos_y offsets so
-    that children inside containers are compared correctly against top-level nodes.
-    Returns None when the node is not found.
+    Walks up the parent_id chain (up to 8 levels) using the session identity
+    map so shared ancestors are fetched at most once per request.
     """
-    node = await db.get(Node, node_id)
-    if node is None:
-        return None
     y = node.pos_y
     current = node
     for _ in range(8):
@@ -37,18 +33,34 @@ async def _abs_y(db: AsyncSession, node_id: str) -> float | None:
     return y
 
 
+async def _abs_y(db: AsyncSession, node_id: str) -> float | None:
+    """Resolve the approximate absolute canvas Y of a node.
+
+    Thin wrapper around _walk_y for callers that only have a node ID.
+    Returns None when the node is not found.
+    """
+    node = await db.get(Node, node_id)
+    if node is None:
+        return None
+    return await _walk_y(db, node)
+
+
 async def _auto_handles(
     db: AsyncSession, source_id: str, target_id: str
 ) -> tuple[str, str]:
-    """Return (source_handle, target_handle) that reflect the upstream/downstream
-    relationship between two nodes.
+    """Return (source_handle, target_handle) based on canvas Y positions.
 
-    - Source above target (lower Y value) → downstream flow: exit bottom, enter top
-    - Source below target → upstream flow: exit top, enter bottom
-    - Equal or unknown → default to bottom/top-t (most common topology direction)
+    Loads both endpoint nodes in a single batch query so the session identity
+    map can cache shared ancestors (e.g. two VMs on the same Proxmox host).
     """
-    src_y = await _abs_y(db, source_id)
-    tgt_y = await _abs_y(db, target_id)
+    result = await db.execute(select(Node).where(Node.id.in_([source_id, target_id])))
+    node_map = {n.id: n for n in result.scalars()}
+
+    src_node = node_map.get(source_id)
+    tgt_node = node_map.get(target_id)
+
+    src_y = await _walk_y(db, src_node) if src_node else None
+    tgt_y = await _walk_y(db, tgt_node) if tgt_node else None
 
     if src_y is None or tgt_y is None or src_y <= tgt_y:
         return "bottom", "top-t"

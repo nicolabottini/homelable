@@ -1,7 +1,8 @@
 import { createElement, useEffect, useMemo } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { NodeResizer, useUpdateNodeInternals, useViewport, type NodeProps, type Node } from '@xyflow/react'
 import { Cpu, MemoryStick, HardDrive, ExternalLink, type LucideIcon } from 'lucide-react'
-import type { NodeData } from '@/types'
+import type { NodeData, ServiceStatus } from '@/types'
 import { resolveNodeColors } from '@/utils/nodeColors'
 import { resolveNodeIcon, isBrandIconKey } from '@/utils/nodeIcons'
 import { NodeIcon } from '@/components/ui/NodeIcon'
@@ -32,15 +33,29 @@ export function BaseNode({ id, data, selected, icon: typeIcon, width, height }: 
 
   const activeTheme = useThemeStore((s) => s.activeTheme)
   const hideIp = useCanvasStore((s) => s.hideIp)
-  const serviceStatuses = useCanvasStore((s) => s.serviceStatuses)
+  // Scoped selector: only subscribe to this node's own service status keys.
+  // Without this, every BaseNode re-renders whenever ANY node's status changes
+  // because setServiceStatuses spreads a new object on every update.
+  const services = data.services ?? []
+  const showServices = data.custom_colors?.show_services === true
+  const nodeServiceStatuses = useCanvasStore(
+    useShallow((s): Record<string, ServiceStatus> => {
+      const out: Record<string, ServiceStatus> = {}
+      if (!showServices) return out
+      for (const svc of services) {
+        const key = serviceStatusKey(id, svc.port, svc.protocol)
+        const val = s.serviceStatuses[key]
+        if (val !== undefined) out[key] = val
+      }
+      return out
+    })
+  )
   const theme = THEMES[activeTheme]
 
   const resolvedIcon = resolveNodeIcon(typeIcon, data.custom_icon)
   const colors = resolveNodeColors(data, activeTheme)
   const statusColor = theme.colors.statusColors[data.status]
   const isOnline = data.status === 'online'
-  const services = data.services ?? []
-  const showServices = data.custom_colors?.show_services === true
   const serviceHost = data.ip ? primaryIp(data.ip) : data.hostname
 
   // Properties: prefer new system; fall back to legacy hardware fields for unmigrated nodes
@@ -161,7 +176,7 @@ export function BaseNode({ id, data, selected, icon: typeIcon, width, height }: 
           <div className="flex flex-col gap-1 px-2.5 py-1.5 overflow-hidden">
             {services.map((svc, idx) => {
               const url = getServiceUrl(svc, serviceHost)
-              const svcOffline = serviceStatuses[serviceStatusKey(id, svc.port, svc.protocol)] === 'offline'
+              const svcOffline = nodeServiceStatuses[serviceStatusKey(id, svc.port, svc.protocol)] === 'offline'
               const row = (
                 <div
                   className="nodrag flex items-center justify-between gap-2 px-1.5 py-1 rounded text-[10px] min-w-0 overflow-hidden"

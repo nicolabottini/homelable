@@ -35,6 +35,50 @@ function tokenize(s: string): string[] {
   return normalize(s).split(' ').filter(Boolean)
 }
 
+// ---------------------------------------------------------------------------
+// Module-level index cache keyed on slugs array reference.
+// Both callers (AutoIconModal, BrandIconPicker) hold their SLUGS at module
+// scope, so this is a permanent cache hit after the first call per array.
+// ---------------------------------------------------------------------------
+
+interface MatchIndex {
+  /** normalized base → preferred plain slug */
+  slugMap: Map<string, string>
+  /** normalized base → pre-split tokens (avoids re-splitting in passes 3 & 4) */
+  tokenMap: Map<string, string[]>
+}
+
+let _cachedSlugs: string[] | null = null
+let _cachedIndex: MatchIndex | null = null
+
+function buildIndex(slugs: string[]): MatchIndex {
+  if (slugs === _cachedSlugs && _cachedIndex !== null) return _cachedIndex
+
+  const slugMap = new Map<string, string>()
+  for (const slug of slugs) {
+    const base = slugBase(slug)
+    const normBase = normalize(base)
+    if (!slugMap.has(normBase)) {
+      slugMap.set(normBase, slug)
+    } else {
+      const existing = slugMap.get(normBase)!
+      const existingIsVariant = existing.endsWith('-dark') || existing.endsWith('-light')
+      const currentIsVariant = slug.endsWith('-dark') || slug.endsWith('-light')
+      if (existingIsVariant && !currentIsVariant) slugMap.set(normBase, slug)
+    }
+  }
+
+  // Pre-tokenize all base names so passes 3 & 4 don't re-split on every call
+  const tokenMap = new Map<string, string[]>()
+  for (const normBase of slugMap.keys()) {
+    tokenMap.set(normBase, normBase.split(' ').filter(Boolean))
+  }
+
+  _cachedSlugs = slugs
+  _cachedIndex = { slugMap, tokenMap }
+  return _cachedIndex
+}
+
 /**
  * Returns the best brand-icon slug for a given label, or null if no
  * confident match exists. Ignores -dark/-light variants (prefers the plain
@@ -45,22 +89,7 @@ export function matchBrandIcon(label: string, slugs: string[]): IconMatch | null
 
   const normLabel = normalize(label)
   const labelTokens = tokenize(label)
-
-  // Build index: normalized-base → preferred slug (plain > dark > light)
-  const baseIndex = new Map<string, string>()
-  for (const slug of slugs) {
-    const base = slugBase(slug)
-    const normBase = normalize(base)
-    if (!baseIndex.has(normBase)) {
-      baseIndex.set(normBase, slug)
-    } else {
-      // Plain slug is preferred over -dark/-light variants
-      const existing = baseIndex.get(normBase)!
-      const existingIsVariant = existing.endsWith('-dark') || existing.endsWith('-light')
-      const currentIsVariant = slug.endsWith('-dark') || slug.endsWith('-light')
-      if (existingIsVariant && !currentIsVariant) baseIndex.set(normBase, slug)
-    }
-  }
+  const { slugMap: baseIndex, tokenMap } = buildIndex(slugs)
 
   // 1. Exact match (also space-insensitive, so acronym camelCase like
   //    "TrueNAS" -> "truenas" still resolves despite the camelCase split)
@@ -76,7 +105,6 @@ export function matchBrandIcon(label: string, slugs: string[]): IconMatch | null
   // 2. Prefix / contains match — label is prefix of slug base or vice versa
   for (const [normBase, slug] of baseIndex) {
     if (normBase.startsWith(normLabel) || normLabel.startsWith(normBase)) {
-      // Require the shorter string to be at least 4 chars to avoid noise
       const shorter = normBase.length < normLabel.length ? normBase : normLabel
       if (shorter.length >= 4) return { slug, confidence: 'high' }
     }
@@ -85,7 +113,7 @@ export function matchBrandIcon(label: string, slugs: string[]): IconMatch | null
   // 3. All label tokens appear in slug tokens (e.g. "Home Assistant" → home-assistant)
   if (labelTokens.length >= 1) {
     for (const [normBase, slug] of baseIndex) {
-      const baseTokens = normBase.split(' ').filter(Boolean)
+      const baseTokens = tokenMap.get(normBase)!
       if (labelTokens.every((t) => baseTokens.includes(t))) {
         return { slug, confidence: 'high' }
       }
@@ -95,7 +123,7 @@ export function matchBrandIcon(label: string, slugs: string[]): IconMatch | null
   // 4. Single shared meaningful token (partial)
   if (labelTokens.length >= 1) {
     for (const [normBase, slug] of baseIndex) {
-      const baseTokens = normBase.split(' ').filter(Boolean)
+      const baseTokens = tokenMap.get(normBase)!
       const shared = labelTokens.filter((t) => t.length >= 4 && baseTokens.includes(t))
       if (shared.length > 0) return { slug, confidence: 'partial' }
     }

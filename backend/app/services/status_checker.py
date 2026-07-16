@@ -102,9 +102,13 @@ async def _ping(host: str) -> bool:
     return proc.returncode == 0
 
 
-async def _http_get(url: str, verify: bool = False) -> bool:
-    async with httpx.AsyncClient(verify=verify, timeout=5) as client:
+async def _http_get(url: str, verify: bool = False, client: httpx.AsyncClient | None = None) -> bool:
+    """HTTP GET that reuses a caller-provided client when supplied."""
+    if client is not None:
         resp = await client.get(url, follow_redirects=True)
+        return resp.status_code < 500
+    async with httpx.AsyncClient(verify=verify, timeout=5, follow_redirects=True) as c:
+        resp = await c.get(url)
         return resp.status_code < 500
 
 
@@ -138,7 +142,7 @@ def _service_host(svc: dict[str, Any], host: str) -> str:
     return f"[{host}]" if _is_ipv6(host) else host
 
 
-async def check_service(svc: dict[str, Any], host: str | None) -> str:
+async def check_service(svc: dict[str, Any], host: str | None, client: httpx.AsyncClient | None = None) -> str:
     """Check a single service. Returns 'online' | 'offline' | 'unknown'.
 
     Only HTTP(S)-reachable services get a real check (an HTTP GET). Everything
@@ -169,7 +173,7 @@ async def check_service(svc: dict[str, Any], host: str | None) -> str:
         ) else "http"
         url_host = _service_host(svc, host)
         url = f"{scheme}://{url_host}" + (f":{port}" if port is not None else "")
-        return "online" if await _http_get(url, verify=False) else "offline"
+        return "online" if await _http_get(url, verify=False, client=client) else "offline"
     except Exception as exc:
         logger.debug("Service check failed for %s:%s (%s)", host, port, exc)
         return "offline"
@@ -180,13 +184,19 @@ async def check_services(
 ) -> list[dict[str, Any]]:
     """Check every service against host concurrently (bounded).
 
+    A single AsyncClient is created per call so TCP connections are reused
+    across concurrent checks, avoiding a TLS handshake per service.
     Returns a list of {port, protocol, status} dicts, one per input service.
     """
+    if not services:
+        return []
+
     sem = asyncio.Semaphore(concurrency)
 
-    async def _one(svc: dict[str, Any]) -> dict[str, Any]:
-        async with sem:
-            status = await check_service(svc, host)
-        return {"port": svc.get("port"), "protocol": svc.get("protocol"), "status": status}
+    async with httpx.AsyncClient(verify=False, timeout=5, follow_redirects=True) as shared_client:
+        async def _one(svc: dict[str, Any]) -> dict[str, Any]:
+            async with sem:
+                status = await check_service(svc, host, shared_client)
+            return {"port": svc.get("port"), "protocol": svc.get("protocol"), "status": status}
 
-    return await asyncio.gather(*[_one(s) for s in services]) if services else []
+        return list(await asyncio.gather(*[_one(s) for s in services]))

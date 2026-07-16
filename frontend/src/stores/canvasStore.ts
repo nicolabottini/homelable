@@ -276,17 +276,26 @@ export const useCanvasStore = create<CanvasState>((rawSet) => {
     set((state) => {
       // Start from explicitly selected nodes, then pull in all descendants so a
       // copied group / container brings its children along.
-      const ids = new Set(state.nodes.filter((n) => n.selected).map((n) => n.id))
-      if (ids.size === 0) return { clipboard: { nodes: [], edges: [] } }
-      let grew = true
-      while (grew) {
-        grew = false
-        for (const n of state.nodes) {
-          const pid = parentIdOf(n)
-          if (pid && ids.has(pid) && !ids.has(n.id)) {
-            ids.add(n.id)
-            grew = true
-          }
+      const initial = new Set(state.nodes.filter((n) => n.selected).map((n) => n.id))
+      if (initial.size === 0) return { clipboard: { nodes: [], edges: [] } }
+
+      // BFS descent: build parent→children adjacency once, then expand from roots.
+      // Replaces the O(n²) iterative expansion with O(n) BFS.
+      const childrenOf = new Map<string, string[]>()
+      for (const n of state.nodes) {
+        const pid = parentIdOf(n)
+        if (pid) {
+          const list = childrenOf.get(pid)
+          if (list) list.push(n.id)
+          else childrenOf.set(pid, [n.id])
+        }
+      }
+      const ids = new Set(initial)
+      const queue = [...initial]
+      while (queue.length > 0) {
+        const pid = queue.shift()!
+        for (const childId of childrenOf.get(pid) ?? []) {
+          if (!ids.has(childId)) { ids.add(childId); queue.push(childId) }
         }
       }
       const nodes = state.nodes.filter((n) => ids.has(n.id))
@@ -376,7 +385,16 @@ export const useCanvasStore = create<CanvasState>((rawSet) => {
   onNodesChange: (changes) =>
     set((state) => {
       const nodes = applyNodeChanges(changes, state.nodes)
-      const selectedNodeIds = nodes.filter((n) => n.selected).map((n) => n.id)
+      // Only recompute selectedNodeIds when selection actually changes.
+      // Position/dimension changes fire at 60 fps during drags — skipping
+      // the filter there avoids a full-array scan on every frame.
+      // 'remove' is included so keyboard-deleted nodes leave selectedNodeIds.
+      const needsSelectionRecompute = changes.some(
+        (c) => c.type === 'select' || c.type === 'remove'
+      )
+      const selectedNodeIds = needsSelectionRecompute
+        ? nodes.filter((n) => n.selected).map((n) => n.id)
+        : state.selectedNodeIds
       // Manually-placed edge waypoints are stored as absolute canvas coords, so
       // they don't follow a moved node on their own. Translate them by the same
       // delta the node moved so a clean routing stays clean after a drag (#279).
@@ -658,6 +676,9 @@ export const useCanvasStore = create<CanvasState>((rawSet) => {
       const safeCols = Math.max(1, Math.min(columns, children.length))
       const { width, height } = containerDims(children.length, safeCols)
 
+      // O(1) child-index lookup: Map avoids O(m) findIndex per node in the full canvas
+      const childIndex = new Map(children.map((c, i) => [c.id, i] as [string, number]))
+
       const nodes = state.nodes.map((n) => {
         if (n.id === containerId) {
           return {
@@ -667,8 +688,8 @@ export const useCanvasStore = create<CanvasState>((rawSet) => {
             data: { ...n.data, container_columns: safeCols },
           }
         }
-        const idx = children.findIndex((c) => c.id === n.id)
-        if (idx >= 0) {
+        const idx = childIndex.get(n.id)
+        if (idx !== undefined) {
           return { ...n, position: childRelPos(idx, safeCols) }
         }
         return n

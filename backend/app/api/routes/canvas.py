@@ -74,11 +74,16 @@ async def save_canvas(
 
     await db.flush()
 
+    # Build lookup dicts from already-loaded sets — avoids a per-row db.get()
+    # since existing_nodes/edges are already in the session identity map.
+    node_map = {n.id: n for n in existing_nodes}
+    edge_map = {e.id: e for e in existing_edges}
+
     # Upsert nodes
     for node_data in body.nodes:
-        db_node = await db.get(Node, node_data.id)
         payload = node_data.model_dump()
         payload["design_id"] = design_id
+        db_node = node_map.get(node_data.id)
         if db_node:
             for field, value in payload.items():
                 setattr(db_node, field, value)
@@ -87,9 +92,9 @@ async def save_canvas(
 
     # Upsert edges
     for edge_data in body.edges:
-        db_edge = await db.get(Edge, edge_data.id)
         payload = edge_data.model_dump()
         payload["design_id"] = design_id
+        db_edge = edge_map.get(edge_data.id)
         if db_edge:
             for field, value in payload.items():
                 setattr(db_edge, field, value)

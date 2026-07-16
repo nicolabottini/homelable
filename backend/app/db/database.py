@@ -252,6 +252,19 @@ async def init_db() -> None:
         await conn.exec_driver_sql(
             "UPDATE edges SET design_id = ? WHERE design_id IS NULL", (_default_design_id,),
         )
+        # Index design_id on both tables so canvas load / scan filters are fast.
+        # SQLite does not auto-index FK columns, so a full-table scan happens on
+        # every design switch without this.
+        await _try_migrate(
+            conn,
+            "CREATE INDEX IF NOT EXISTS ix_nodes_design_id ON nodes(design_id)",
+            label="nodes.design_id.index",
+        )
+        await _try_migrate(
+            conn,
+            "CREATE INDEX IF NOT EXISTS ix_edges_design_id ON edges(design_id)",
+            label="edges.design_id.index",
+        )
 
         # Migrate canvas_state from id=1 to design_id PK (SQLite rebuild)
         try:
