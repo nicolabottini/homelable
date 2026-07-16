@@ -62,7 +62,10 @@ export async function refreshSelfhstIcons(): Promise<number> {
   )
   if (!res.ok) throw new Error(`selfhst index responded with ${res.status} ${res.statusText}`)
   const index = await res.json()
-  const slugs: string[] = Object.keys(index as Record<string, unknown>).sort()
+  const slugs: string[] = (index as { Reference: string }[])
+    .map((e) => e.Reference)
+    .filter(Boolean)
+    .sort()
   writeCache(CACHE_KEYS.selfhst, slugs)
   return slugs.length
 }
