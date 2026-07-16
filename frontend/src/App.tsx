@@ -41,6 +41,7 @@ import { useCanvasStore } from '@/stores/canvasStore'
 import { readAutosaveSettings, subscribeAutosaveSettings, type AutosaveSettings } from '@/utils/autosaveSettings'
 import { useAutosave } from '@/hooks/useAutosave'
 import { initAutoRefreshIcons } from '@/utils/iconManifestCache'
+import { readAutosaveSettings, subscribeAutosaveSettings, type AutosaveSettings } from '@/utils/autosaveSettings'
 import { useDesignStore } from '@/stores/designStore'
 import { useAuthStore } from '@/stores/authStore'
 import { useThemeStore } from '@/stores/themeStore'
@@ -96,6 +97,9 @@ export default function App() {
   useEffect(() => {
     initAutoRefreshIcons()
   }, [])
+
+  const [autosave, setAutosave] = useState<AutosaveSettings>(readAutosaveSettings)
+  useEffect(() => subscribeAutosaveSettings(setAutosave), [])
 
   const [themeModalOpen, setThemeModalOpen] = useState(false)
   const [styleEditorType, setStyleEditorType] = useState<NodeType | null>(null)
