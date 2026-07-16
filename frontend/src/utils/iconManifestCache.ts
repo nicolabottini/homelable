@@ -31,8 +31,16 @@ function writeCache(key: string, slugs: string[]) {
   }
 }
 
+// Discard a cache that looks like numeric indices — symptom of the old
+// Object.keys()-on-array bug where slugs were stored as "0","1","2",...
+function isValidSlugCache(slugs: string[]): boolean {
+  return slugs.length === 0 || isNaN(Number(slugs[0]))
+}
+
 export function getCachedSlugs(type: ManifestType, bundled: string[]): string[] {
-  return readCache(CACHE_KEYS[type])?.slugs ?? bundled
+  const cached = readCache(CACHE_KEYS[type])?.slugs
+  if (!cached || !isValidSlugCache(cached)) return bundled
+  return cached
 }
 
 export function getLastUpdated(type: ManifestType): Date | null {
